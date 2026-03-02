@@ -23,7 +23,7 @@ def parse_docker_date(date_str):
 def parse_args():
     parser = argparse.ArgumentParser(description="Docker Hub Tag Cleanup Script")
     parser.add_argument("--namespace", required=True, help="Docker Hub namespace/organization")
-    parser.add_argument("--token", required=True, help="Docker Hub PAT with read:write scope")
+    parser.add_argument("--token", default=None, help="Docker Hub PAT with read:write scope (required for deletions)")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without deleting")
     parser.add_argument("--backup-file", default="dockerhub_backup.json", help="Backup file path (used when not providing --input-json)")
     parser.add_argument("--retention-days", type=int, default=90, help="Days to retain tags")
@@ -56,7 +56,7 @@ def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
     If preserve_rules is empty, the global_preserve_last value is used.
     Returns a list of tag dictionaries with additional computed fields.
     """
-    pull_cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    update_cutoff = datetime.utcnow() - timedelta(days=retention_days)
     processed = []
     
     # Parse dates once and build a new collection with computed fields.
@@ -101,20 +101,15 @@ def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
         reasons = []
         if tag["name"] in preserved_reasons:
             reasons.append(preserved_reasons[tag["name"]])
-        if tag["last_pulled_dt"] and tag["last_pulled_dt"] >= pull_cutoff:
-            reasons.append(f"pulled within retention ({retention_days} days)")
-        
+        if tag["last_updated_dt"] >= update_cutoff:
+            reasons.append(f"updated within retention ({retention_days} days)")
+
         if reasons:
             tag["status"] = "PRESERVED"
             tag["reason"] = ", ".join(reasons)
         else:
-            deletion_reasons = []
-            if not tag["last_pulled_dt"]:
-                deletion_reasons.append("never pulled")
-            else:
-                deletion_reasons.append(f"not pulled since {pull_cutoff.isoformat()}")
             tag["status"] = "TO DELETE"
-            tag["reason"] = ", ".join(deletion_reasons)
+            tag["reason"] = f"not updated since {update_cutoff.isoformat()}"
     
     return processed
 
@@ -194,7 +189,13 @@ def main():
         else:
             preserve_rules[rule] = None
 
-    headers = {"Authorization": f"Bearer {args.token}"}
+    if args.token:
+        r = requests.post(f"{DH_API_BASE}/auth/token", json={"identifier": args.namespace, "secret": args.token})
+        r.raise_for_status()
+        jwt = r.json()["access_token"]
+        headers = {"Authorization": f"Bearer {jwt}"}
+    else:
+        headers = {}
     
     with open(args.report_file, "w", newline="") as csvfile:  # use report file from argument
         writer = csv.writer(csvfile)
