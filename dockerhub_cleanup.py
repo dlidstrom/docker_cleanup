@@ -44,12 +44,16 @@ def get_jwt(args):
 
 def get_paginated_results(url, headers, params=None):
     results = []
+    params = {**(params or {}), "page_size": 100}
     while url:
         response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 404:
+            break
         response.raise_for_status()
         data = response.json()
         results.extend(data["results"])
         url = data.get("next")
+        params = None  # params are already encoded in subsequent next URLs
     return results
 
 def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
