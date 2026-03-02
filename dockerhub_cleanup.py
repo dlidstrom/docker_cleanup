@@ -1,8 +1,7 @@
 import argparse
 import csv
 import json
-from datetime import datetime, timedelta
-import time
+from datetime import datetime, timedelta, timezone
 import requests
 
 # DockerHub API configuration
@@ -51,7 +50,6 @@ def get_paginated_results(url, headers, params=None):
         data = response.json()
         results.extend(data["results"])
         url = data.get("next")
-        time.sleep(1)  # Rate limit protection
     return results
 
 def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
@@ -61,7 +59,7 @@ def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
     If preserve_rules is empty, the global_preserve_last value is used.
     Returns a list of tag dictionaries with additional computed fields.
     """
-    update_cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    update_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
     processed = []
     
     # Parse dates once and build a new collection with computed fields.
@@ -145,58 +143,21 @@ def process_repository(repo_name, tags, args, preserve_rules, headers, writer):
                         response = requests.delete(delete_url, headers=headers)
                     response.raise_for_status()
                     print(f"Deleted {image}")
-                    time.sleep(1)
                 except requests.HTTPError as e:
                     print(f"Failed to delete {image} - {str(e)}")
 
-def fetch_backup_data(args, headers):
-    backup_data = {}
+def fetch_repos(args, headers):
     print(f"Fetching repositories for {args.namespace}...")
     try:
-        repos_url = f"{DH_API_BASE}/repositories/{args.namespace}/"
-        repos = get_paginated_results(repos_url, headers)
+        repos = get_paginated_results(f"{DH_API_BASE}/repositories/{args.namespace}/", headers)
     except requests.HTTPError:
-        repos_url = f"{DH_API_BASE}/users/{args.namespace}/repositories/"
-        repos = get_paginated_results(repos_url, headers)
+        repos = get_paginated_results(f"{DH_API_BASE}/users/{args.namespace}/repositories/", headers)
     print(f"Found {len(repos)} repositories")
-
-    for repo_data in repos:
-        repo_name = repo_data["name"]
-        # If --repos is provided, process only specified repos; otherwise, use skip-repos filtering.
-        if args.repos:
-            if repo_name not in args.repos:
-                continue
-        else:
-            if any(repo_name.startswith(prefix) for prefix in args.skip_repos):
-                print(f"Skipping repository: {repo_name}")
-                continue
-        tags_url = f"{DH_API_BASE}/repositories/{args.namespace}/{repo_name}/tags/"
-        print(f"Fetching tags for {repo_name}...")
-        try:
-            tags = get_paginated_results(tags_url, headers)
-        except requests.HTTPError as e:
-            print(f"Error fetching tags for {repo_name}: {str(e)}")
-            continue
-        print(f"Found {len(tags)} tags in {repo_name}")
-        backup_data[repo_name] = tags
-    return backup_data
-
-def load_backup_data(args):
-    with open(args.input_json, "r") as f:
-        return json.load(f)
-
-def get_backup_data(args, headers):
-    if args.input_json:
-        print(f"Loading backup data from {args.input_json} ...")
-        return load_backup_data(args)
-    else:
-        return fetch_backup_data(args, headers)
+    return repos
 
 def main():
     args = parse_args()
-    
-    # Parse the preservation rules into a dictionary.
-    # Expected format: prefix:number (e.g., prod:10 staging:5)
+
     preserve_rules = {}
     for rule in args.preserve:
         if ":" in rule:
@@ -206,29 +167,44 @@ def main():
             preserve_rules[rule] = None
 
     headers = {"Authorization": f"Bearer {get_jwt(args)}"} if args.token else {}
-    
-    with open(args.report_file, "w", newline="") as csvfile:  # use report file from argument
+
+    with open(args.report_file, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Repository", "Tag", "Last Pulled", "Last Updated", "Status", "Reason"])
-        
-        backup_data = get_backup_data(args, headers)
-        
-        # Filter backup_data if specific repositories are provided via --repos
-        if args.repos:
-            backup_data = {repo: tags for repo, tags in backup_data.items() if repo in args.repos}
-            if not backup_data:
-                print("No matching repositories found in backup data for the provided --repos argument.")
-                return
-        
-        # Process each repository's backup data; use skip-repos only when --repos is not provided.
-        for repo_name, tags in backup_data.items():
-            if not args.repos and any(repo_name.startswith(prefix) for prefix in args.skip_repos):
-                print(f"Skipping repository: {repo_name}")
-                continue
-            process_repository(repo_name, tags, args, preserve_rules, headers, writer)
-        
-        # Save backup data if it was fetched from the API.
-        if not args.input_json:
+
+        if args.input_json:
+            print(f"Loading backup data from {args.input_json} ...")
+            with open(args.input_json, "r") as f:
+                backup_data = json.load(f)
+            for repo_name, tags in backup_data.items():
+                if args.repos and repo_name not in args.repos:
+                    continue
+                if not args.repos and any(repo_name.startswith(p) for p in args.skip_repos):
+                    print(f"Skipping repository: {repo_name}")
+                    continue
+                process_repository(repo_name, tags, args, preserve_rules, headers, writer)
+        else:
+            repos = fetch_repos(args, headers)
+            backup_data = {}
+            for repo_data in repos:
+                repo_name = repo_data["name"]
+                if args.repos:
+                    if repo_name not in args.repos:
+                        continue
+                else:
+                    if any(repo_name.startswith(p) for p in args.skip_repos):
+                        print(f"Skipping repository: {repo_name}")
+                        continue
+                print(f"Fetching tags for {repo_name}...")
+                try:
+                    tags = get_paginated_results(f"{DH_API_BASE}/repositories/{args.namespace}/{repo_name}/tags/", headers)
+                except requests.HTTPError as e:
+                    print(f"Error fetching tags for {repo_name}: {str(e)}")
+                    continue
+                print(f"Found {len(tags)} tags in {repo_name}")
+                backup_data[repo_name] = tags
+                process_repository(repo_name, tags, args, preserve_rules, headers, writer)
+
             with open(args.backup_file, "w") as f:
                 json.dump(backup_data, f, indent=2)
             print(f"Backup saved to {args.backup_file}")
