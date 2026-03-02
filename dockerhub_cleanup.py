@@ -38,6 +38,11 @@ def parse_args():
     parser.add_argument("--report-file", default="cleanup_report.csv", help="Report file path")  # new argument
     return parser.parse_args()
 
+def get_jwt(args):
+    r = requests.post(f"{DH_API_BASE}/auth/token", json={"identifier": args.namespace, "secret": args.token})
+    r.raise_for_status()
+    return r.json()["access_token"]
+
 def get_paginated_results(url, headers, params=None):
     results = []
     while url:
@@ -115,6 +120,8 @@ def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
 
 def process_repository(repo_name, tags, args, preserve_rules, headers, writer):
     processed_tags = process_tags(tags, args.retention_days, args.preserve_last, preserve_rules)
+    to_delete = sum(1 for t in processed_tags if t["status"] == "TO DELETE")
+    print(f"Processing {repo_name}: {len(processed_tags)} tags, {to_delete} to delete")
     for tag in processed_tags:
         writer.writerow([
             repo_name,
@@ -125,27 +132,34 @@ def process_repository(repo_name, tags, args, preserve_rules, headers, writer):
             tag["reason"]
         ])
         if tag["status"] == "TO DELETE":
+            image = f"{args.namespace}/{repo_name}:{tag['name']} (last updated: {tag['last_updated_str']})"
             if args.dry_run:
-                print(f"[Dry Run] Would delete {repo_name}:{tag['name']}")
+                print(f"[Dry Run] Would delete {image}")
             else:
                 delete_url = f"{DH_API_BASE}/repositories/{args.namespace}/{repo_name}/tags/{tag['name']}/"
+                print(f"Deleting {image}")
                 try:
                     response = requests.delete(delete_url, headers=headers)
+                    if response.status_code == 401:
+                        headers["Authorization"] = f"Bearer {get_jwt(args)}"
+                        response = requests.delete(delete_url, headers=headers)
                     response.raise_for_status()
-                    print(f"Deleted {repo_name}:{tag['name']}")
+                    print(f"Deleted {image}")
                     time.sleep(1)
                 except requests.HTTPError as e:
-                    print(f"Failed to delete {repo_name}:{tag['name']} - {str(e)}")
+                    print(f"Failed to delete {image} - {str(e)}")
 
 def fetch_backup_data(args, headers):
     backup_data = {}
+    print(f"Fetching repositories for {args.namespace}...")
     try:
         repos_url = f"{DH_API_BASE}/repositories/{args.namespace}/"
         repos = get_paginated_results(repos_url, headers)
     except requests.HTTPError:
         repos_url = f"{DH_API_BASE}/users/{args.namespace}/repositories/"
         repos = get_paginated_results(repos_url, headers)
-    
+    print(f"Found {len(repos)} repositories")
+
     for repo_data in repos:
         repo_name = repo_data["name"]
         # If --repos is provided, process only specified repos; otherwise, use skip-repos filtering.
@@ -157,11 +171,13 @@ def fetch_backup_data(args, headers):
                 print(f"Skipping repository: {repo_name}")
                 continue
         tags_url = f"{DH_API_BASE}/repositories/{args.namespace}/{repo_name}/tags/"
+        print(f"Fetching tags for {repo_name}...")
         try:
             tags = get_paginated_results(tags_url, headers)
         except requests.HTTPError as e:
             print(f"Error fetching tags for {repo_name}: {str(e)}")
             continue
+        print(f"Found {len(tags)} tags in {repo_name}")
         backup_data[repo_name] = tags
     return backup_data
 
@@ -189,13 +205,7 @@ def main():
         else:
             preserve_rules[rule] = None
 
-    if args.token:
-        r = requests.post(f"{DH_API_BASE}/auth/token", json={"identifier": args.namespace, "secret": args.token})
-        r.raise_for_status()
-        jwt = r.json()["access_token"]
-        headers = {"Authorization": f"Bearer {jwt}"}
-    else:
-        headers = {}
+    headers = {"Authorization": f"Bearer {get_jwt(args)}"} if args.token else {}
     
     with open(args.report_file, "w", newline="") as csvfile:  # use report file from argument
         writer = csv.writer(csvfile)
