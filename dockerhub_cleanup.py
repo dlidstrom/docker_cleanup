@@ -89,20 +89,19 @@ def process_tags(tags, retention_days, global_preserve_last, preserve_rules):
     # Prepare a dictionary to track preserved tags and their preservation reasons.
     preserved_reasons = {}
     
-    if preserve_rules:
-        for prefix, count in preserve_rules.items():
-            matching = [tag for tag in processed if tag["name"].startswith(prefix)]
-            if count is None:
-                for tag in matching:
-                    preserved_reasons[tag["name"]] = f"preserved all for prefix '{prefix}'"
-            else:
-                for tag in matching[:count]:
-                    if tag["name"] not in preserved_reasons:
-                        preserved_reasons[tag["name"]] = f"top {count} for prefix '{prefix}'"
-    else:
-        for tag in processed[:global_preserve_last]:
-            if tag["name"] not in preserved_reasons:
-                preserved_reasons[tag["name"]] = f"top {global_preserve_last} newest tags"
+    for tag in processed[:global_preserve_last]:
+        if tag["name"] not in preserved_reasons:
+            preserved_reasons[tag["name"]] = f"top {global_preserve_last} newest tags"
+
+    for prefix, count in preserve_rules.items():
+        matching = [tag for tag in processed if tag["name"].startswith(prefix)]
+        if count is None:
+            for tag in matching:
+                preserved_reasons[tag["name"]] = f"preserved all for prefix '{prefix}'"
+        else:
+            for tag in matching[:count]:
+                if tag["name"] not in preserved_reasons:
+                    preserved_reasons[tag["name"]] = f"top {count} for prefix '{prefix}'"
     
     for tag in processed:
         reasons = []
